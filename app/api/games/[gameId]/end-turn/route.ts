@@ -1,75 +1,114 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
-import { zEndTurn } from '@/lib/z';
-import { logEvent } from '@/lib/events';
-import { runTrigger } from '@/lib/engine/triggers';
 
 type Ctx = { params: Promise<{ gameId: string }> };
 
 export async function POST(req: NextRequest, ctx: Ctx) {
     try {
         const { gameId } = await ctx.params;
-        const { playerId } = zEndTurn.parse(await req.json());
+        const body = await req.json();
+        const { playerId } = body as { playerId: string };
 
-        const res = await prisma.$transaction(async (tx) => {
+        if (!playerId) throw new Error('BAD_INPUT');
+
+        const result = await prisma.$transaction(async (tx) => {
+            const game = await tx.game.findUnique({ where: { id: gameId } });
+            if (!game) throw new Error('GAME_NOT_FOUND');
+            if (game.status === 'finished') throw new Error('GAME_FINISHED');
+
             const turn = await tx.turn.findFirst({ where: { gameId }, orderBy: { index: 'desc' } });
             if (!turn) throw new Error('TURN_NOT_FOUND');
             if (turn.currentPlayerId !== playerId) throw new Error('NOT_YOUR_TURN');
 
-            // Règle: lancer obligatoire avant fin de tour
+            // empêcher fin de tour si choix de direction en attente
+            const pending = await tx.eventLog.findFirst({
+                where: { gameId, type: 'MOVE_PENDING' },
+                orderBy: { ts: 'desc' },
+            });
+            if (pending && (pending.payload as any)?.stepsLeft > 0) {
+                throw new Error('MOVE_PENDING_CHOICE_REQUIRED');
+            }
+
+            // le joueur doit avoir lancé le dé
             const rolled = await tx.eventLog.count({
                 where: { gameId, turnId: turn.id, actorId: playerId, type: 'ROLL_AND_MOVE' },
             });
-            if (rolled === 0) throw new Error('MUST_ROLL_BEFORE_END_TURN');
+            if (rolled === 0) throw new Error('MUST_ROLL_BEFORE_END');
 
-            await runTrigger(gameId, 'turn.end', { turnId: turn.id, playerId });
+            // calcul de l’ordre des joueurs "encore en jeu"
+            const players = await tx.player.findMany({
+                where: { gameId },
+                orderBy: { id: 'asc' }, // ordre fixe V1
+            });
+            const alive = players.filter(p => p.isActive);
 
-            // Liste ordonnée des joueurs + liste des actifs
-            const playersAll = await tx.player.findMany({ where: { gameId }, orderBy: { id: 'asc' } });
-            const actives = playersAll.filter(p => p.isActive);
-
-            // Trouver le "suivant actif" en gardant l'ordre fixe (par id)
-            let next = null as (typeof playersAll)[number] | null;
-
-            if (actives.length > 0) {
-                // Si le joueur courant est encore actif, on cherche le premier actif avec id > current; sinon on prend le premier actif
-                // (si le courant est devenu inactif au lancer, on prendra juste le premier actif)
-                for (const p of actives) {
-                    if (p.id > playerId) { next = p; break; }
-                }
-                if (!next) next = actives[0];
-            }
-
-            // Clore le tour courant
-            await tx.turn.update({ where: { id: turn.id }, data: { endedAt: new Date() } });
-
-            if (!next) {
-                // Plus aucun joueur actif → partie terminée
+            // s’il ne reste qu’un joueur actif, on pourrait décréter la fin (optionnel V1)
+            if (alive.length === 0) {
                 await tx.game.update({ where: { id: gameId }, data: { status: 'finished' } });
-                const ev = await logEvent(tx, gameId, 'GAME_FINISHED', { reason: 'NO_ACTIVE_PLAYERS' }, turn.id, playerId);
-                return { gameFinished: true, cursor: ev.id };
+                await tx.eventLog.create({ data: { gameId, turnId: turn.id, actorId: playerId, type: 'TURN_ENDED', payload: { finished: true } } });
+                return { ok: true, finished: true };
             }
 
-            // Nouveau tour pour le prochain joueur actif
-            const nextTurn = await tx.turn.create({
-                data: { gameId, index: turn.index + 1, currentPlayerId: next.id },
+            // trouver l’index du joueur actif actuel dans la liste ordonnée
+            const order = players.map(p => p.id);
+            const curIdx = order.indexOf(turn.currentPlayerId);
+            if (curIdx < 0) throw new Error('TURN_PLAYER_NOT_FOUND');
+
+            // on passe au joueur suivant, en consommant les skipNextTurn tant que nécessaire
+            const maxHops = players.length + 5; // sécurité anti-boucle
+            let hops = 0;
+            let nextIdx = (curIdx + 1) % players.length;
+            let chosen: typeof players[number] | null = null;
+
+            while (hops < maxHops) {
+                const cand = players[nextIdx];
+
+                if (cand.isActive) {
+                    if (cand.skipNextTurn) {
+                        // Consommer le skip et passer au suivant
+                        await tx.player.update({ where: { id: cand.id }, data: { skipNextTurn: false } });
+                        await tx.eventLog.create({
+                            data: { gameId, turnId: turn.id, actorId: cand.id, type: 'TURN_SKIPPED', payload: { reason: 'skipNextTurn' } },
+                        });
+                        nextIdx = (nextIdx + 1) % players.length;
+                        hops++;
+                        continue;
+                    } else {
+                        chosen = cand;
+                        break;
+                    }
+                } else {
+                    // joueur terminé → passer
+                    nextIdx = (nextIdx + 1) % players.length;
+                    hops++;
+                }
+            }
+
+            if (!chosen) {
+                // si personne ne peut jouer → fin de partie
+                await tx.game.update({ where: { id: gameId }, data: { status: 'finished' } });
+                await tx.eventLog.create({ data: { gameId, turnId: turn.id, actorId: playerId, type: 'TURN_ENDED', payload: { finished: true } } });
+                return { ok: true, finished: true };
+            }
+
+            // clôturer le tour courant et créer le nouveau
+            await tx.eventLog.create({ data: { gameId, turnId: turn.id, actorId: playerId, type: 'TURN_ENDED', payload: {} } });
+
+            const newTurn = await tx.turn.create({
+                data: {
+                    gameId,
+                    index: turn.index + 1,
+                    currentPlayerId: chosen.id,
+                },
             });
 
-            const ev = await logEvent(
-                tx,
-                gameId,
-                'END_TURN',
-                { from: playerId, to: next.id, turnIndex: nextTurn.index },
-                nextTurn.id,
-                playerId
-            );
+            // nettoyer d’éventuels MOVE_PENDING obsolètes
+            await tx.eventLog.deleteMany({ where: { gameId, type: 'MOVE_PENDING' } });
 
-            await runTrigger(gameId, 'turn.start', { turnId: nextTurn.id, playerId: next.id });
-
-            return { nextPlayerId: next.id, turnIndex: nextTurn.index, cursor: ev.id };
+            return { ok: true, turnId: newTurn.id, currentPlayerId: chosen.id };
         });
 
-        return NextResponse.json({ ok: true, ...res });
+        return NextResponse.json(result);
     } catch (e: any) {
         return NextResponse.json({ ok: false, error: e.message ?? 'ERR' }, { status: 400 });
     }

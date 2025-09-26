@@ -30,21 +30,17 @@ export default function RuleEditor({
     const [rules, setRules] = useState<Rule[]>([]);
     const [error, setError] = useState<string | null>(null);
 
-    // Form state
     const [action, setAction] = useState<'add'|'modify'|'remove'>('add');
     const [selectedRuleId, setSelectedRuleId] = useState<string>('');
 
-    // Core fields
     const [trigger, setTrigger] = useState<string>('on.enterTile');
     const [scope, setScope] = useState<'generic'|'player'|'tile'>('generic');
     const [priority, setPriority] = useState<number>(0);
     const [specificity, setSpecificity] = useState<number>(0);
     const [enabled, setEnabled] = useState<boolean>(true);
 
-    // Simple “conditions” (optionnel, JSON autorisé mais champ texte)
     const [condText, setCondText] = useState<string>('');
 
-    // Effects builder (liste courte pour V1)
     type EffectForm = { type: 'dice.set'|'move.delta'|'victory.declare'; value?: string; steps?: number; message?: string };
     const [effects, setEffects] = useState<EffectForm[]>([]);
 
@@ -62,7 +58,6 @@ export default function RuleEditor({
         })();
     }, [open, gameId]);
 
-    // Si on passe en "modify/remove", pré-remplir depuis la règle choisie
     useEffect(() => {
         if (action === 'add') return;
         const r = rules.find(x => x.id === selectedRuleId);
@@ -73,7 +68,6 @@ export default function RuleEditor({
         setSpecificity(r.specificity ?? 0);
         setEnabled(r.enabled);
         setCondText(r.conditions ? JSON.stringify(r.conditions, null, 2) : '');
-        // Effects → normaliser
         const arr = Array.isArray(r.effects) ? r.effects : [r.effects];
         const ef: EffectForm[] = arr.map((e: any) => {
             if (e.type === 'dice.set') return { type: 'dice.set', value: (e.faces ?? []).join(',') };
@@ -92,9 +86,20 @@ export default function RuleEditor({
     const canSubmit = useMemo(() => {
         if (action === 'remove') return !!selectedRuleId;
         if (action === 'modify') return !!selectedRuleId;
-        // add
         return trigger && scope && effects.length > 0;
     }, [action, selectedRuleId, trigger, scope, effects.length]);
+
+    // 🎯 P R E S E T S
+    const applyPresetBonusEnterTile = () => {
+        setAction('add');
+        setTrigger('on.enterTile');
+        setScope('generic');
+        setPriority(0);
+        setSpecificity(0);
+        setEnabled(true);
+        setCondText('');
+        setEffects([{ type: 'move.delta', steps: 1 }]);
+    };
 
     const submit = async () => {
         try {
@@ -104,10 +109,7 @@ export default function RuleEditor({
             if (action === 'remove') {
                 payload.ruleId = selectedRuleId;
             } else {
-                // build rule object
-                const rule: any = {
-                    scope, trigger, priority, specificity, enabled,
-                };
+                const rule: any = { scope, trigger, priority, specificity, enabled };
                 if (condText.trim().length) {
                     try {
                         rule.conditions = JSON.parse(condText);
@@ -115,7 +117,6 @@ export default function RuleEditor({
                         throw new Error('Conditions : JSON invalide.');
                     }
                 }
-                // effects → DSL
                 const effs = effects.map(e => {
                     if (e.type === 'dice.set') {
                         const faces = (e.value ?? '')
@@ -149,12 +150,17 @@ export default function RuleEditor({
             if (!res.ok || !j.ok) throw new Error(j.error || 'Impossible de valider la règle.');
             onSaved();
             onClose();
+            alert('Règle appliquée ✔️'); // feedback simple et évident
         } catch (e: any) {
             setError(e.message || 'Erreur inconnue.');
         }
     };
 
     if (!open) return null;
+
+    const humanSummary =
+        action === 'remove' ? 'Tu vas SUPPRIMER la règle sélectionnée.'
+            : `Quand « ${trigger} » se produit, cette règle s’applique sur « ${scope} » et exécute ${effects.length} effet(s).`;
 
     return (
         <div className="fixed inset-0 z-40">
@@ -167,7 +173,7 @@ export default function RuleEditor({
                     </div>
 
                     <div className="p-4 grid md:grid-cols-3 gap-4">
-                        {/* Colonne gauche : intention & sélection */}
+                        {/* Colonne gauche : intentions + presets */}
                         <div className="md:col-span-1 space-y-3">
                             <div>
                                 <div className="text-xs text-neutral-400 mb-1">Action</div>
@@ -202,13 +208,22 @@ export default function RuleEditor({
                                 </div>
                             )}
 
+                            {/* Preset rapide très clair */}
+                            {action === 'add' && (
+                                <div className="mt-3">
+                                    <div className="text-xs text-neutral-400 mb-1">Presets rapides</div>
+                                    <button
+                                        onClick={applyPresetBonusEnterTile}
+                                        className="w-full text-left text-sm px-3 py-2 rounded-md bg-emerald-700/30 border border-emerald-600 hover:bg-emerald-700/40"
+                                        title="Ajoute automatiquement un bonus de +1 case à chaque entrée de case pour tous les joueurs."
+                                    >
+                                        ✅ Bonus simple : <strong>+1 case à chaque entrée de case</strong> (tous joueurs)
+                                    </button>
+                                </div>
+                            )}
+
                             <div className="text-xs text-neutral-400">
-                                <p className="mb-2">👉 <strong>But de la règle :</strong> définis quand elle s’applique (déclencheur + conditions), et ce qu’elle fait (effets).</p>
-                                <ul className="list-disc ml-4 space-y-1">
-                                    <li><em>Déclencheur</em> (ex: <code>on.enterTile</code>)</li>
-                                    <li><em>Portée</em> (générique / joueur / case)</li>
-                                    <li><em>Effets</em> (ex: modifier le dé, déplacer, déclarer la victoire)</li>
-                                </ul>
+                                <p className="mb-2">👉 <strong>But :</strong> définis quand la règle s’applique (déclencheur + conditions) et ce qu’elle fait (effets).</p>
                             </div>
                         </div>
 
@@ -253,10 +268,10 @@ export default function RuleEditor({
                                             <label className="text-xs text-neutral-400">Spécificité</label>
                                             <input className="w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-2 text-sm" type="number" value={specificity} onChange={e=>setSpecificity(parseInt(e.target.value,10)||0)} />
                                         </div>
-                                        <div className="flex items-center gap-2">
+                                        <label className="flex items-center gap-2">
                                             <input id="enabled" type="checkbox" checked={enabled} onChange={e=>setEnabled(e.target.checked)} />
-                                            <label htmlFor="enabled" className="text-xs text-neutral-300">Active</label>
-                                        </div>
+                                            <span className="text-xs text-neutral-300">Active</span>
+                                        </label>
                                     </div>
 
                                     <div>
@@ -277,7 +292,7 @@ export default function RuleEditor({
 
                                         <div className="mt-2 space-y-2">
                                             {effects.length === 0 && (
-                                                <div className="text-xs text-neutral-500">Aucun effet. Ajoute au moins un effet.</div>
+                                                <div className="text-xs text-neutral-500">Aucun effet. Ajoute au moins un effet (ex: déplacement +1).</div>
                                             )}
                                             {effects.map((e, i) => (
                                                 <div key={i} className="rounded border border-neutral-800 bg-neutral-900/40 p-2 grid grid-cols-5 gap-2">
@@ -304,7 +319,7 @@ export default function RuleEditor({
                                                             className="col-span-2 bg-neutral-800 border border-neutral-700 rounded px-2 py-2 text-sm"
                                                             type="number"
                                                             placeholder="Steps (ex: 2 ou -1)"
-                                                            value={e.steps ?? 0}
+                                                            value={e.steps ?? 1}
                                                             onChange={ev => updateEffect(i, { steps: parseInt(ev.target.value,10)||0 })}
                                                         />
                                                     )}
@@ -345,14 +360,8 @@ export default function RuleEditor({
                         </div>
                     </div>
 
-                    {/* Bandeau d'explication */}
                     <div className="px-4 py-3 border-t border-neutral-800 text-xs text-neutral-300">
-                        <strong>Résumé :</strong>{' '}
-                        {action === 'remove' ? (
-                            <>tu vas supprimer la règle sélectionnée. Elle ne s’appliquera plus.</>
-                        ) : (
-                            <>ta règle s’exécutera sur <em>{scope}</em> quand <em>{trigger}</em> se produit, avec {effects.length} effet(s) appliqué(s).</>
-                        )}
+                        <strong>Résumé :</strong> {humanSummary}
                     </div>
                 </div>
             </div>

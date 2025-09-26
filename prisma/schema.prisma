@@ -29,18 +29,19 @@ model Game {
 }
 
 model Player {
-  id         String           @id @default(cuid())
-  gameId     String
-  game       Game             @relation(fields: [gameId], references: [id], onDelete: Cascade)
-  nickname   String
-  color      String           @default("#cccccc")
-  isActive   Boolean          @default(true)
-  mainPawnId String?
-  pawns      Pawn[]
-  inventory  InventoryItem[]
-  resources  PlayerResource[]
-  Die        Die[]
-  EventLog   EventLog[]
+  id           String           @id @default(cuid())
+  gameId       String
+  game         Game             @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  nickname     String
+  color        String           @default("#cccccc")
+  isActive     Boolean          @default(true)
+  mainPawnId   String?
+  skipNextTurn Boolean          @default(false)
+  pawns        Pawn[]
+  inventory    InventoryItem[]
+  resources    PlayerResource[]
+  Die          Die[]
+  EventLog     EventLog[]
 
   @@index([gameId])
 }

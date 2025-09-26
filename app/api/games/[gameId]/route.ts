@@ -3,33 +3,47 @@ import { prisma } from '@/lib/prisma';
 
 type Ctx = { params: Promise<{ gameId: string }> };
 
-// DELETE /api/games/:gameId → supprime totalement la partie (et ses dépendances)
+// (Optionnel) GET pour debug rapide d'une partie
+export async function GET(_: NextRequest, ctx: Ctx) {
+    try {
+        const { gameId } = await ctx.params;
+        const game = await prisma.game.findUnique({ where: { id: gameId } });
+        if (!game) return NextResponse.json({ ok: false, error: 'NOT_FOUND' }, { status: 404 });
+        return NextResponse.json({ ok: true, game });
+    } catch (e: any) {
+        return NextResponse.json({ ok: false, error: e.message ?? 'ERR' }, { status: 400 });
+    }
+}
+
 export async function DELETE(_: NextRequest, ctx: Ctx) {
     try {
-        const { gameId } = await ctx.params; // ✅ pas de React.use ici
+        const { gameId } = await ctx.params;
 
         await prisma.$transaction(async (tx) => {
-            // Journaux & règles
+            // Purge des logs d'événements en premier (souvent le plus volumineux)
             await tx.eventLog.deleteMany({ where: { gameId } });
-            await tx.rule.deleteMany({ where: { gameId } });
 
-            // Ressources & inventaire
-            await tx.playerResource.deleteMany({ where: { gameId } });
-            await tx.resourceDef.deleteMany({ where: { gameId } });
-            await tx.inventoryItem.deleteMany({ where: { gameId } });
+            // Purge des objets dépendants (si certains modèles n'existent pas, on ignore silencieusement)
+            // Règles
+            await tx.rule.deleteMany({ where: { gameId } }).catch(() => {});
+            // Dés éventuels
+            await tx.die.deleteMany({ where: { gameId } }).catch(() => {});
+            // Effets de cases (si tu as un modèle TileEffect)
+            // NB: ton routeur de tiles y fait référence, donc on le tente ici aussi
+            // @ts-ignore - ignorer si ton client Prisma n'a pas ce modèle
+            await (tx as any).tileEffect?.deleteMany?.({ where: { gameId } }).catch(() => {});
+            // Inventaire / ressources (si présents dans ton schéma)
+            // @ts-ignore
+            await (tx as any).inventoryItem?.deleteMany?.({ where: { gameId } }).catch(() => {});
+            // @ts-ignore
+            await (tx as any).playerResource?.deleteMany?.({ where: { gameId } }).catch(() => {});
 
-            // Connexions / effets / tuiles
+            // Connexions -> Pions -> Tours -> Joueurs -> Cases (ordre pour FK)
             await tx.connection.deleteMany({ where: { gameId } });
-            await tx.tileEffect.deleteMany({ where: { gameId } });
-            await tx.tile.deleteMany({ where: { gameId } });
-
-            // Pions / dés / joueurs
             await tx.pawn.deleteMany({ where: { gameId } });
-            await tx.die.deleteMany({ where: { gameId } });
-            await tx.player.deleteMany({ where: { gameId } });
-
-            // Tours
             await tx.turn.deleteMany({ where: { gameId } });
+            await tx.player.deleteMany({ where: { gameId } });
+            await tx.tile.deleteMany({ where: { gameId } });
 
             // Enfin, la partie
             await tx.game.delete({ where: { id: gameId } });

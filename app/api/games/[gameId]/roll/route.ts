@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { zRoll } from '@/lib/z';
 import { logEvent } from '@/lib/events';
-import { applyTileEffectsAfterMove } from '@/lib/engine/tiles';
 
 type Ctx = { params: Promise<{ gameId: string }> };
 
@@ -13,6 +12,15 @@ function hashToFloat(s: string) {
         h = Math.imul(h, 16777619) >>> 0;
     }
     return (h % 1_000_000) / 1_000_000;
+}
+
+async function nextTiles(tx: any, gameId: string, fromTileId: string) {
+    const edges = await tx.connection.findMany({ where: { gameId, fromTileId } });
+    return edges.map((e: any) => e.toTileId);
+}
+
+async function tileAt(tx: any, gameId: string, x: number, y: number) {
+    return tx.tile.findFirst({ where: { gameId, x, y } });
 }
 
 export async function POST(req: NextRequest, ctx: Ctx) {
@@ -28,15 +36,21 @@ export async function POST(req: NextRequest, ctx: Ctx) {
             if (!turn) throw new Error('TURN_NOT_FOUND');
             if (turn.currentPlayerId !== playerId) throw new Error('NOT_YOUR_TURN');
 
-            // joueur actif ?
             const player = await tx.player.findUnique({ where: { id: playerId } });
             if (!player?.isActive) throw new Error('PLAYER_INACTIVE');
 
-            // déjà lancé ce tour ?
             const already = await tx.eventLog.count({
                 where: { gameId, turnId: turn.id, actorId: playerId, type: 'ROLL_AND_MOVE' },
             });
             if (already > 0) throw new Error('ALREADY_ROLLED_THIS_TURN');
+
+            // core pawn & case courante
+            if (!player.mainPawnId) throw new Error('CORE_PAWN_MISSING');
+            const pawn = await tx.pawn.findUnique({ where: { id: player.mainPawnId } });
+            if (!pawn) throw new Error('CORE_PAWN_NOT_FOUND');
+
+            const fromTile = await tileAt(tx, gameId, pawn.x ?? 0, pawn.y ?? 0);
+            if (!fromTile) throw new Error('NO_TILE_UNDER_PAWN');
 
             const die = await tx.die.findFirst({ where: { gameId, ownerPlayerId: playerId } });
             if (!die) throw new Error('NO_DIE');
@@ -48,45 +62,47 @@ export async function POST(req: NextRequest, ctx: Ctx) {
             const idx = Math.floor(hashToFloat(seedVariant) * faces.length);
             const rolled = faces[idx];
 
-            // pion principal
-            if (!player.mainPawnId) throw new Error('CORE_PAWN_MISSING');
-            const core = await tx.pawn.findUnique({ where: { id: player.mainPawnId } });
-            if (!core) throw new Error('CORE_PAWN_NOT_FOUND');
-
-            // déplacement de base
-            const maxX = await tx.tile.aggregate({ where: { gameId }, _max: { x: true } });
-            const targetX = Math.min((core.x ?? 0) + rolled, maxX._max.x ?? 19);
-            await tx.pawn.update({ where: { id: core.id }, data: { x: targetX, y: 0 } });
-
-            // journaliser le lancer+move initial
-            const ev = await logEvent(
+            // journaliser le lancer
+            await logEvent(
                 tx, gameId, 'ROLL_AND_MOVE',
-                { playerId, die: die.label, faces, rolled, to: { x: targetX, y: 0 } },
+                { playerId, die: die.label, faces, rolled },
                 turn.id, playerId
             );
 
-            // appliquer effets de tuiles/règles AVEC LA MEME TX
-            await applyTileEffectsAfterMove(tx, gameId, turn.id, playerId);
+            // prépare un MOVE_PENDING (ne déplace pas tout de suite)
+            const choices = await nextTiles(tx, gameId, fromTile.id);
+            // auto-avance si 0 ou 1 choix jusqu’à tomber sur un embranchement ou épuiser les steps
+            let stepsLeft = rolled;
+            let currentTileId = fromTile.id;
 
-            // relire position finale après effets
-            const finalPawn = await tx.pawn.findUnique({ where: { id: core.id }, select: { x: true, y: true } });
-            const finalTo = { x: finalPawn?.x ?? targetX, y: finalPawn?.y ?? 0 };
-
-            // arrivée ? rendre inactif si case goal/arrival
-            const tileAtDest = await tx.tile.findFirst({
-                where: { gameId, x: finalTo.x, y: finalTo.y },
-                select: { preset: true, tags: true },
-            });
-            const isArrival = !!tileAtDest && (tileAtDest.preset === 'goal' || (tileAtDest.tags as any)?.includes?.('arrival'));
-            if (isArrival && player.isActive) {
-                await tx.player.update({ where: { id: playerId }, data: { isActive: false } });
-                await logEvent(tx, gameId, 'PLAYER_FINISHED', { playerId, position: finalTo }, turn.id, playerId);
+            while (stepsLeft > 0) {
+                const outs = await nextTiles(tx, gameId, currentTileId);
+                if (outs.length === 0) break;
+                if (outs.length > 1) {
+                    // on stoppe pour demander un choix
+                    break;
+                }
+                // une seule sortie → avance d’1
+                currentTileId = outs[0];
+                stepsLeft -= 1;
+                // update pawn position à chaque step auto
+                const t = await tx.tile.findUnique({ where: { id: currentTileId } });
+                await tx.pawn.update({ where: { id: pawn.id }, data: { x: t.x, y: t.y } });
             }
 
-            return { rolled, to: finalTo, cursor: ev.id };
+            const pendingPayload = { pawnId: pawn.id, currentTileId, stepsLeft };
+            await tx.eventLog.create({
+                data: {
+                    gameId, turnId: turn.id, actorId: playerId,
+                    type: 'MOVE_PENDING',
+                    payload: pendingPayload,
+                }
+            });
+
+            return { ok: true, rolled, pendingMove: pendingPayload };
         });
 
-        return NextResponse.json({ ok: true, ...res });
+        return NextResponse.json(res);
     } catch (e: any) {
         return NextResponse.json({ ok: false, error: e.message ?? 'ERR' }, { status: 400 });
     }

@@ -1,26 +1,39 @@
 'use client';
 
-import React, { useMemo } from 'react';
+import React, { useMemo, useRef } from 'react';
 
 type Tile = { id: string; x: number; y: number; preset: string; tags: string[] };
+type Conn = { id: string; fromTileId: string; toTileId: string; bidir: boolean };
 type Pawn = { id: string; ownerPlayerId?: string | null; kind: string; x: number; y: number };
 type Player = { id: string; nickname: string; color: string; mainPawnId?: string | null; isActive: boolean };
 
 export default function Board({
                                   tiles,
+                                  connections = [],
                                   pawns,
                                   players,
                                   size = 56,
                                   overridePawnPositions,
                                   highlightPlayerId,
+                                  selectable = false,
+                                  selectedTileIds = [],
+                                  onTileClick,
+                                  childrenOverlay, // 👈 overlay rendu dans le même conteneur scroll
                               }: {
     tiles: Tile[];
+    connections?: Conn[];
     pawns: Pawn[];
     players: Player[];
     size?: number;
     overridePawnPositions?: Record<string, { x: number; y: number }>;
     highlightPlayerId?: string;
+    selectable?: boolean;
+    selectedTileIds?: string[];
+    onTileClick?: (id: string) => void;
+    childrenOverlay?: React.ReactNode;
 }) {
+    const wrapRef = useRef<HTMLDivElement>(null);
+
     const bounds = useMemo(() => {
         if (!tiles.length) return { minX: 0, maxX: 0, minY: 0, maxY: 0 };
         const xs = tiles.map(t => t.x), ys = tiles.map(t => t.y);
@@ -30,6 +43,8 @@ export default function Board({
     const width = (bounds.maxX - bounds.minX + 1) * size;
     const height = (bounds.maxY - bounds.minY + 1) * size;
 
+    const tMap = useMemo(() => new Map(tiles.map(t => [t.id, t])), [tiles]);
+    const tilePos = (t: Tile) => ({ cx: (t.x - bounds.minX) * size + size / 2, cy: (t.y - bounds.minY) * size + size / 2 });
     const getPlayer = (id?: string | null) => players.find(p => p.id === id);
 
     const groups = useMemo(() => {
@@ -52,11 +67,25 @@ export default function Board({
     };
 
     return (
-        <div className="relative w-full h-[70vh] border rounded-lg overflow-auto bg-neutral-900/40">
-            <div
-                className="relative"
-                style={{ width, height, backgroundImage: 'linear-gradient(transparent 95%, rgba(255,255,255,0.08) 96%)' }}
-            >
+        <div ref={wrapRef} className="relative w-full h-[70vh] border rounded-lg overflow-auto bg-neutral-900/40">
+            <div className="relative" style={{ width, height }}>
+                {/* Connexions */}
+                <svg width={width} height={height} className="absolute left-0 top-0 pointer-events-none">
+                    {connections.map((c) => {
+                        const from = tMap.get(c.fromTileId);
+                        const to = tMap.get(c.toTileId);
+                        if (!from || !to) return null;
+                        const { cx: x1, cy: y1 } = tilePos(from);
+                        const { cx: x2, cy: y2 } = tilePos(to);
+                        return (
+                            <g key={c.id}>
+                                <line x1={x1} y1={y1} x2={x2} y2={y2} stroke="rgba(148,163,184,0.7)" strokeWidth="3" />
+                                {!c.bidir && (<polygon points={`${x2},${y2} ${x2-6},${y2-3} ${x2-6},${y2+3}`} fill="rgba(148,163,184,0.9)" />)}
+                            </g>
+                        );
+                    })}
+                </svg>
+
                 {/* Tiles */}
                 {tiles.map(tile => {
                     const left = (tile.x - bounds.minX) * size;
@@ -66,21 +95,30 @@ export default function Board({
                             tile.preset === 'goal'  ? '#f59e0b' :
                                 tile.preset === 'trap'  ? '#ef4444' :
                                     tile.preset === 'bonus' ? '#3b82f6' : '#6b7280';
+                    const isSelected = selectedTileIds?.includes(tile.id);
 
                     return (
-                        <div key={tile.id}
-                             className="absolute rounded-md flex items-center justify-center text-xs font-medium"
-                             style={{
-                                 left, top, width: size - 8, height: size - 8, margin: 4,
-                                 background: presetColor, color: 'white', boxShadow: '0 2px 6px rgba(0,0,0,.3)'
-                             }}>
+                        <button
+                            key={tile.id}
+                            type="button"
+                            className="absolute rounded-md flex items-center justify-center text-xs font-medium focus:outline-none"
+                            style={{
+                                left, top, width: size - 8, height: size - 8, margin: 4,
+                                background: presetColor, color: 'white',
+                                boxShadow: isSelected ? '0 0 0 3px rgba(99,102,241,.8), 0 2px 6px rgba(0,0,0,.3)' : '0 2px 6px rgba(0,0,0,.3)',
+                                cursor: selectable ? 'pointer' : 'default',
+                                opacity: selectable && !isSelected ? 0.95 : 1,
+                            }}
+                            onClick={onTileClick ? () => onTileClick(tile.id) : undefined}
+                            title={`(${tile.x},${tile.y}) ${tile.preset}`}
+                        >
                             {tile.preset}{tile.tags.includes('arrival') ? ' ⭐' : ''}
-                        </div>
+                        </button>
                     );
                 })}
 
                 {/* Pawns */}
-                {Array.from(groups.entries()).map(([key, group]) => {
+                {Array.from(groups.entries()).flatMap(([key, group]) => {
                     const [gx, gy] = key.split(',').map(Number);
                     const baseLeft = (gx - bounds.minX) * size + size / 2;
                     const baseTop = (gy - bounds.minY) * size + size / 2;
@@ -99,10 +137,7 @@ export default function Board({
                         return (
                             <div key={p.id} className="absolute" style={{ left: baseLeft + dx - diameter/2, top: baseTop + dy - diameter/2 }}>
                                 {isActivePlayer && (
-                                    <div
-                                        className="absolute inset-0 rounded-full animate-ping"
-                                        style={{ background: 'rgba(99,102,241,0.25)', filter: 'blur(1px)' }}
-                                    />
+                                    <div className="absolute inset-0 rounded-full animate-ping" style={{ background: 'rgba(99,102,241,0.25)', filter: 'blur(1px)' }} />
                                 )}
                                 <div
                                     className="relative rounded-full transition-all duration-150"
@@ -120,6 +155,13 @@ export default function Board({
                         );
                     });
                 })}
+
+                {/* Overlay synchronisé (choix de direction, etc.) */}
+                {childrenOverlay && (
+                    <div className="absolute inset-0 pointer-events-none">
+                        {childrenOverlay}
+                    </div>
+                )}
             </div>
         </div>
     );

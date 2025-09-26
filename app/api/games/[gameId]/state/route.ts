@@ -7,55 +7,64 @@ export async function GET(_: NextRequest, ctx: Ctx) {
     try {
         const { gameId } = await ctx.params;
 
-        const [game, turn, players, pawns, tiles, connections, lastEvent] = await Promise.all([
+        const [game, turn, players, pawns, tiles, connections, lastEvent, pending] = await Promise.all([
             prisma.game.findUnique({ where: { id: gameId } }),
-            prisma.turn.findFirst({ where: { gameId }, orderBy: { index: 'desc' } }),
+
+            prisma.turn.findFirst({
+                where: { gameId },
+                orderBy: { index: 'desc' }, // OK: Turn a bien 'index'
+            }),
+
             prisma.player.findMany({
                 where: { gameId },
-                select: { id: true, nickname: true, color: true, mainPawnId: true, isActive: true },
-                orderBy: { id: 'asc' },
+                orderBy: { id: 'asc' }, // ⚠️ Player n'a pas createdAt → on trie par id
             }),
-            prisma.pawn.findMany({ where: { gameId }, select: { id: true, ownerPlayerId: true, kind: true, x: true, y: true } }),
-            prisma.tile.findMany({ where: { gameId }, select: { id: true, x: true, y: true, preset: true, tags: true } }),
-            prisma.connection.findMany({ where: { gameId }, select: { id: true, fromTileId: true, toTileId: true, bidir: true } }),
-            prisma.eventLog.findFirst({ where: { gameId }, orderBy: { id: 'desc' }, select: { id: true } }),
+
+            prisma.pawn.findMany({ where: { gameId } }),
+            prisma.tile.findMany({ where: { gameId } }),
+            prisma.connection.findMany({ where: { gameId } }),
+
+            prisma.eventLog.findFirst({
+                where: { gameId },
+                orderBy: { ts: 'desc' }, // ⚠️ EventLog → utiliser 'ts' (pas createdAt)
+            }),
+
+            prisma.eventLog.findFirst({
+                where: { gameId, type: 'MOVE_PENDING' },
+                orderBy: { ts: 'desc' }, // ⚠️ idem
+            }),
         ]);
 
-        if (!game || !turn) throw new Error('GAME_OR_TURN_NOT_FOUND');
+        const rolledThisTurn = !!(turn && await prisma.eventLog.count({
+            where: { gameId, turnId: turn.id, type: 'ROLL_AND_MOVE' },
+        }));
 
-        const rolledThisTurn = await prisma.eventLog.count({
-            where: { gameId, turnId: turn.id, actorId: turn.currentPlayerId, type: 'ROLL_AND_MOVE' },
-        }).then(c => c > 0);
+        const lastRollEvent = turn ? await prisma.eventLog.findFirst({
+            where: { gameId, turnId: turn.id, type: 'ROLL_AND_MOVE' },
+            orderBy: { ts: 'desc' }, // ⚠️ ts
+        }) : null;
 
-        const lastRollEv = await prisma.eventLog.findFirst({
-            where: { gameId, turnId: turn.id, actorId: turn.currentPlayerId, type: 'ROLL_AND_MOVE' },
-            orderBy: { id: 'desc' },
-            select: { payload: true },
-        });
-        const lastRoll = typeof (lastRollEv?.payload as any)?.rolled === 'number'
-            ? (lastRollEv!.payload as any).rolled as number
-            : null;
-
-        // 👉 a-t-on déjà consommé la “modif de règle/case” de ce tour ?
-        const ruleOrTileChangedThisTurn = await prisma.eventLog.count({
+        const ruleChangedThisTurn = !!(turn && await prisma.eventLog.count({
             where: {
-                gameId,
-                turnId: turn.id,
-                type: { in: ['RULE_ADDED','RULE_MODIFIED','RULE_REMOVED','TILE_EDIT'] },
+                gameId, turnId: turn.id,
+                type: { in: ['RULE_ADDED','RULE_MODIFIED','RULE_REMOVED','TILE_EDIT'] }
             }
-        }).then(c => c > 0);
+        }));
+
+        const pendingMove = pending ? (pending.payload as any) : null;
 
         return NextResponse.json({
             ok: true,
-            game: { id: game.id, name: game.name, status: game.status, seed: game.seed, createdAt: game.createdAt },
-            turn: {
+            game,
+            turn: turn ? {
                 id: turn.id,
                 index: turn.index,
                 currentPlayerId: turn.currentPlayerId,
                 rolledThisTurn,
-                lastRoll,
-                ruleChangedThisTurn: ruleOrTileChangedThisTurn,
-            },
+                lastRoll: lastRollEvent ? (lastRollEvent.payload as any)?.rolled ?? null : null,
+                ruleChangedThisTurn,
+                pendingMove, // { pawnId, currentTileId, stepsLeft } | null
+            } : null,
             players, pawns, tiles, connections,
             cursor: lastEvent?.id ?? null,
         });
