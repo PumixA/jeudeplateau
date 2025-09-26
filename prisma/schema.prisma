@@ -1,0 +1,229 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Game {
+  id             String             @id @default(cuid())
+  name           String
+  status         String             @default("waiting") // waiting|running|ended
+  seed           String
+  createdAt      DateTime           @default(now())
+  players        Player[]
+  tiles          Tile[]
+  connections    Connection[]
+  rules          Rule[]
+  dice           Die[]
+  events         EventLog[]
+  turns          Turn[]
+  victories      VictoryCondition[]
+  Pawn           Pawn[]
+  TileEffect     TileEffect[]
+  ResourceDef    ResourceDef[]
+  PlayerResource PlayerResource[]
+  InventoryItem  InventoryItem[]
+}
+
+model Player {
+  id         String           @id @default(cuid())
+  gameId     String
+  game       Game             @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  nickname   String
+  color      String           @default("#cccccc")
+  isActive   Boolean          @default(true)
+  mainPawnId String?
+  pawns      Pawn[]
+  inventory  InventoryItem[]
+  resources  PlayerResource[]
+  Die        Die[]
+  EventLog   EventLog[]
+
+  @@index([gameId])
+}
+
+model Pawn {
+  id            String  @id @default(cuid())
+  gameId        String
+  game          Game    @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  ownerPlayerId String?
+  owner         Player? @relation(fields: [ownerPlayerId], references: [id], onDelete: SetNull)
+  kind          String // "core" | "extra"
+  x             Int
+  y             Int
+  state         Json?
+
+  @@index([gameId])
+  @@index([ownerPlayerId])
+}
+
+model Die {
+  id            String @id @default(cuid())
+  gameId        String
+  game          Game   @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  ownerPlayerId String
+  owner         Player @relation(fields: [ownerPlayerId], references: [id], onDelete: Cascade)
+  label         String
+  faces         Json // e.g. [1,2,3,4,5,6]
+
+  @@index([gameId])
+  @@index([ownerPlayerId])
+}
+
+model Tile {
+  id     String   @id @default(cuid())
+  gameId String
+  game   Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  x      Int
+  y      Int
+  preset String // "start" | "goal" | "bonus" | "trap" | "neutral"
+  custom Json?
+  tags   String[]
+
+  effects TileEffect[]
+
+  // 👇 Relations correctes (au lieu de 2x "Connection")
+  fromConnections Connection[] @relation("From")
+  toConnections   Connection[] @relation("To")
+
+  @@unique([gameId, x, y])
+  @@index([gameId])
+}
+
+model Connection {
+  id         String  @id @default(cuid())
+  gameId     String
+  game       Game    @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  fromTileId String
+  toTileId   String
+  bidir      Boolean @default(true)
+
+  fromTile Tile @relation("From", fields: [fromTileId], references: [id], onDelete: Cascade)
+  toTile   Tile @relation("To", fields: [toTileId], references: [id], onDelete: Cascade)
+
+  @@index([gameId])
+  @@index([fromTileId])
+  @@index([toTileId])
+}
+
+model TileEffect {
+  id         String @id @default(cuid())
+  gameId     String
+  game       Game   @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  tileId     String
+  tile       Tile   @relation(fields: [tileId], references: [id], onDelete: Cascade)
+  type       String // "damage" | "resource_gain" | "teleport" ...
+  payload    Json
+  priority   Int    @default(0)
+  conditions Json?
+
+  @@index([gameId])
+  @@index([tileId])
+}
+
+model Rule {
+  id          String   @id @default(cuid())
+  gameId      String
+  game        Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  scope       String // "board" | "dice" | "move" | "inventory" | ...
+  trigger     String // WHEN
+  conditions  Json? // IF
+  effects     Json // THEN
+  priority    Int      @default(0)
+  specificity Int      @default(0)
+  duration    Json?
+  enabled     Boolean  @default(true)
+  createdBy   String?
+  createdAt   DateTime @default(now())
+
+  @@index([gameId])
+}
+
+model VictoryCondition {
+  id       String @id @default(cuid())
+  gameId   String
+  game     Game   @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  logic    String // "AND" | "OR"
+  payload  Json
+  priority Int    @default(0)
+
+  @@index([gameId])
+}
+
+model ResourceDef {
+  id     String @id @default(cuid())
+  gameId String
+  game   Game   @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  name   String
+  kind   String // "int" | "float" | "bool"
+  min    Float?
+  max    Float?
+
+  players PlayerResource[]
+
+  @@unique([gameId, name])
+  @@index([gameId])
+}
+
+model PlayerResource {
+  id         String      @id @default(cuid())
+  gameId     String
+  game       Game        @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  playerId   String
+  player     Player      @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  resourceId String
+  resource   ResourceDef @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+  value      Float       @default(0)
+
+  @@index([gameId])
+  @@index([playerId])
+  @@index([resourceId])
+}
+
+model InventoryItem {
+  id       String @id @default(cuid())
+  gameId   String
+  game     Game   @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  playerId String
+  player   Player @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  name     String
+  stack    Int    @default(1)
+  meta     Json?
+
+  @@index([gameId])
+  @@index([playerId])
+}
+
+model Turn {
+  id              String     @id @default(cuid())
+  gameId          String
+  game            Game       @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  index           Int
+  currentPlayerId String
+  startedAt       DateTime   @default(now())
+  endedAt         DateTime?
+  EventLog        EventLog[]
+
+  @@index([gameId])
+  @@index([currentPlayerId])
+}
+
+model EventLog {
+  id      String   @id @default(cuid())
+  gameId  String
+  game    Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  turnId  String?
+  turn    Turn?    @relation(fields: [turnId], references: [id], onDelete: SetNull)
+  actorId String?
+  actor   Player?  @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  type    String
+  payload Json
+  ts      DateTime @default(now())
+
+  @@index([gameId])
+  @@index([turnId])
+  @@index([actorId])
+}
